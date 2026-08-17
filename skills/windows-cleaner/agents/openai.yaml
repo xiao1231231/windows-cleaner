@@ -1,0 +1,4 @@
+interface:
+  display_name: "Windows Cleaner"
+  short_description: "分析 Windows 磁盘占用并安全预览和执行清理"
+  default_prompt: "使用 $windows-cleaner 分析本机磁盘占用，先生成安全清理建议和删除预览。"

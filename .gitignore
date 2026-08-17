@@ -1,0 +1,42 @@
+# Local credentials and secrets
+.env
+.env.*
+!.env.example
+.npmrc
+.pypirc
+credentials
+credentials.json
+service-account*.json
+id_rsa*
+id_ed25519*
+*.pem
+*.key
+*.pfx
+*.p12
+*.kdbx
+
+# Local agent configuration
+.codex/
+.claude/
+
+# Operating system files
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Editors
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Temporary and test output
+*.log
+*.tmp
+*.bak
+TestResults/
+
+# Language caches
+__pycache__/
+*.py[cod]
+.pytest_cache/

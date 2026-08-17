@@ -1,0 +1,61 @@
+name: Safety tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-powershell:
+    runs-on: windows-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Validate Skill identity
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $skillDirectory = Resolve-Path -LiteralPath '.\skills\windows-cleaner'
+          if ((Split-Path -Leaf $skillDirectory) -ne 'windows-cleaner') {
+              throw 'The Skill folder name must be windows-cleaner.'
+          }
+          $nameLine = Get-Content -LiteralPath (Join-Path $skillDirectory 'SKILL.md') -Encoding UTF8 |
+              Select-String -Pattern '^name:\s*windows-cleaner\s*$'
+          if (-not $nameLine) {
+              throw 'SKILL.md frontmatter name must be windows-cleaner.'
+          }
+
+      - name: Parse PowerShell files
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $parseErrors = @()
+          Get-ChildItem -LiteralPath '.\skills\windows-cleaner' -Recurse -Filter '*.ps1' -File | ForEach-Object {
+              $tokens = $null
+              $errors = $null
+              [void][System.Management.Automation.Language.Parser]::ParseFile(
+                  $_.FullName,
+                  [ref]$tokens,
+                  [ref]$errors
+              )
+              $parseErrors += $errors
+          }
+          if ($parseErrors.Count -gt 0) {
+              $parseErrors | ForEach-Object { Write-Error $_.Message }
+              throw "PowerShell parsing failed with $($parseErrors.Count) error(s)."
+          }
+
+      - name: Run safety suite
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & '.\skills\windows-cleaner\tests\safety.ps1'
+          if ($LASTEXITCODE -ne 0) {
+              throw "Safety tests failed with exit code $LASTEXITCODE."
+          }
