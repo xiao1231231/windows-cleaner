@@ -195,10 +195,14 @@ try {
     }
     Assert-True ($protectedParentResult -match 'BLOCK.*contains protected') 'Delete rejects a parent containing a built-in protected tree.'
 
-    $testProfile = Join-Path $testRoot 'test-profile'
+    $profileFixtureRoot = Join-Path $testRoot 'profile-fixture'
+    if ($substCreated) {
+        $profileFixtureRoot = $substLetter + ':\profile-fixture'
+    }
+    $testProfile = Join-Path $profileFixtureRoot 'test-profile'
     $downloadsRoot = Join-Path $testProfile 'Downloads'
     $downloadsChild = Join-Path $downloadsRoot 'approved-installer.tmp'
-    $otherProfile = Join-Path (Split-Path -Parent $testProfile) 'other-profile'
+    $otherProfile = Join-Path $profileFixtureRoot 'other-profile'
     [IO.Directory]::CreateDirectory($downloadsRoot) | Out-Null
     [IO.Directory]::CreateDirectory($otherProfile) | Out-Null
     [IO.File]::WriteAllText($downloadsChild, 'fixture')
@@ -214,10 +218,14 @@ try {
     }
     Assert-True ($downloadsRootResult -match 'BLOCK.*personal-data root') 'Delete rejects the Downloads root itself.'
     Assert-True ($downloadsChildResult -match 'PLAN') 'Downloads descendants remain eligible for individual approval.'
-    if ($otherProfileResult -notmatch 'BLOCK.*other user profile') {
-        Write-Output ('DIAGNOSTIC other-profile result: ' + $otherProfileResult.Trim())
+    if ($substCreated) {
+        if ($otherProfileResult -notmatch 'BLOCK.*other user profile') {
+            Write-Output ('DIAGNOSTIC other-profile result: ' + $otherProfileResult.Trim())
+        }
+        Assert-True ($otherProfileResult -match 'BLOCK.*other user profile') 'Delete rejects another user profile tree.'
+    } else {
+        Write-Output 'SKIP  Other-user profile isolation requires a temporary subst drive.'
     }
-    Assert-True ($otherProfileResult -match 'BLOCK.*other user profile') 'Delete rejects another user profile tree.'
 
     if ($substCreated) {
         $criticalRootFile = $substLetter + ':\pagefile.sys'
