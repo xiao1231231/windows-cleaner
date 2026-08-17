@@ -214,6 +214,9 @@ try {
     }
     Assert-True ($downloadsRootResult -match 'BLOCK.*personal-data root') 'Delete rejects the Downloads root itself.'
     Assert-True ($downloadsChildResult -match 'PLAN') 'Downloads descendants remain eligible for individual approval.'
+    if ($otherProfileResult -notmatch 'BLOCK.*other user profile') {
+        Write-Output ('DIAGNOSTIC other-profile result: ' + $otherProfileResult.Trim())
+    }
     Assert-True ($otherProfileResult -match 'BLOCK.*other user profile') 'Delete rejects another user profile tree.'
 
     if ($substCreated) {
