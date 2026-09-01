@@ -7,13 +7,26 @@ $deleteScript = Join-Path $skillRoot 'scripts\delete.ps1'
 $scanCommonScript = Join-Path $skillRoot 'scripts\scan-common.ps1'
 $scanScript = Join-Path $skillRoot 'scripts\scan.ps1'
 $diskScanScript = Join-Path $skillRoot 'scripts\scan-disk.ps1'
+$validatorScript = Join-Path $skillRoot 'tests\validate-skill.ps1'
 $failures = [System.Collections.Generic.List[string]]::new()
+
+function Write-CiError {
+    param([string]$Message)
+
+    if ($env:GITHUB_ACTIONS -ne 'true') {
+        return
+    }
+
+    $escapedMessage = $Message.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+    Write-Output ("::error title=Windows Cleaner safety test::" + $escapedMessage)
+}
 
 function Assert-True {
     param([bool]$Condition, [string]$Message)
     if (-not $Condition) {
         $failures.Add($Message)
         Write-Output ("FAIL  " + $Message)
+        Write-CiError -Message $Message
     } else {
         Write-Output ("PASS  " + $Message)
     }
@@ -250,23 +263,36 @@ try {
     $testProfile = Join-Path $testRoot 'test-profile'
     $downloadsRoot = Join-Path $testProfile 'Downloads'
     $downloadsChild = Join-Path $downloadsRoot 'approved-installer.tmp'
-    $otherProfile = Join-Path (Split-Path -Parent $testProfile) 'other-profile'
+    $appDataRoot = Join-Path $testProfile 'AppData'
+    $localAppDataRoot = Join-Path $appDataRoot 'Local'
+    $roamingAppDataRoot = Join-Path $appDataRoot 'Roaming'
+    $localLowAppDataRoot = Join-Path $appDataRoot 'LocalLow'
+    $approvedCache = Join-Path $localAppDataRoot 'Temp\approved-cache'
     [IO.Directory]::CreateDirectory($downloadsRoot) | Out-Null
-    [IO.Directory]::CreateDirectory($otherProfile) | Out-Null
+    [IO.Directory]::CreateDirectory($roamingAppDataRoot) | Out-Null
+    [IO.Directory]::CreateDirectory($localLowAppDataRoot) | Out-Null
+    [IO.Directory]::CreateDirectory($approvedCache) | Out-Null
     [IO.File]::WriteAllText($downloadsChild, 'fixture')
-    [IO.File]::WriteAllText((Join-Path $otherProfile 'personal-data.tmp'), 'fixture')
     $savedUserProfile = $env:USERPROFILE
     try {
         $env:USERPROFILE = $testProfile
         $downloadsRootResult = Invoke-Text { & $deleteScript -Paths $downloadsRoot }
         $downloadsChildResult = Invoke-Text { & $deleteScript -Paths $downloadsChild }
-        $otherProfileResult = Invoke-Text { & $deleteScript -Paths $otherProfile }
+        $appDataRootResult = Invoke-Text { & $deleteScript -Paths $appDataRoot }
+        $localAppDataRootResult = Invoke-Text { & $deleteScript -Paths $localAppDataRoot }
+        $roamingAppDataRootResult = Invoke-Text { & $deleteScript -Paths $roamingAppDataRoot }
+        $localLowAppDataRootResult = Invoke-Text { & $deleteScript -Paths $localLowAppDataRoot }
+        $approvedCacheResult = Invoke-Text { & $deleteScript -Paths $approvedCache }
     } finally {
         $env:USERPROFILE = $savedUserProfile
     }
     Assert-True ($downloadsRootResult -match 'BLOCK.*personal-data root') 'Delete rejects the Downloads root itself.'
     Assert-True ($downloadsChildResult -match 'PLAN') 'Downloads descendants remain eligible for individual approval.'
-    Assert-True ($otherProfileResult -match 'BLOCK.*other user profile') 'Delete rejects another user profile tree.'
+    Assert-True ($appDataRootResult -match 'BLOCK.*personal-data root') 'Delete rejects the AppData root itself.'
+    Assert-True ($localAppDataRootResult -match 'BLOCK.*personal-data root') 'Delete rejects the Local AppData root itself.'
+    Assert-True ($roamingAppDataRootResult -match 'BLOCK.*personal-data root') 'Delete rejects the Roaming AppData root itself.'
+    Assert-True ($localLowAppDataRootResult -match 'BLOCK.*personal-data root') 'Delete rejects the LocalLow AppData root itself.'
+    Assert-True ($approvedCacheResult -match 'PLAN') 'AppData descendants remain eligible for individual approval.'
 
     if ($substCreated) {
         $criticalRootFile = $substLetter + ':\pagefile.sys'
@@ -412,6 +438,21 @@ try {
         }
         Assert-True ($diskParallelProcess -match 'COMPLETE.*scope=disk.*files=3 dirs=2 skipped_reparse=0 errors=0 workers=2') 'Disk scan reports and honors an explicit parallel worker count.'
         Assert-True ($diskParallelExit -eq 0) 'A parallel disk scan returns exit code 0 for a complete scan.'
+
+        $profileFixturesRoot = $substLetter + ':\profile-fixtures'
+        $substCurrentProfile = Join-Path $profileFixturesRoot 'current-user'
+        $substOtherProfile = Join-Path $profileFixturesRoot 'other-user'
+        [IO.Directory]::CreateDirectory($substCurrentProfile) | Out-Null
+        [IO.Directory]::CreateDirectory($substOtherProfile) | Out-Null
+        [IO.File]::WriteAllText((Join-Path $substOtherProfile 'personal-data.tmp'), 'fixture')
+        $savedUserProfile = $env:USERPROFILE
+        try {
+            $env:USERPROFILE = $substCurrentProfile
+            $otherProfileResult = Invoke-Text { & $deleteScript -Paths $substOtherProfile }
+        } finally {
+            $env:USERPROFILE = $savedUserProfile
+        }
+        Assert-True ($otherProfileResult -match 'BLOCK.*other user profile') 'Delete rejects another user profile tree.'
     }
 
     . $scanCommonScript
@@ -436,6 +477,22 @@ try {
     Assert-True ($skillText -match 'child_count') 'SKILL.md documents snapshot child-count semantics.'
     Assert-True ($skillText -match 'checked_items') 'SKILL.md documents delete-access checked-item semantics.'
     Assert-True ($skillText -match 'OutputFormat Json') 'SKILL.md documents structured JSON deletion output.'
+    $validatorResult = Invoke-Text { & $validatorScript -SkillDirectory $skillRoot }
+    Assert-True ($validatorResult -match 'VALID_SKILL') 'The repository validator accepts the current Skill structure.'
+
+    $invalidSkillRoot = Join-Path $testRoot 'invalid-skill'
+    [IO.Directory]::CreateDirectory($invalidSkillRoot) | Out-Null
+    [IO.File]::WriteAllText((Join-Path $invalidSkillRoot 'SKILL.md'), "---`nname: invalid-skill`ndescription: fixture without closing frontmatter`n", [Text.Encoding]::UTF8)
+    $savedErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $invalidValidatorResult = ((& powershell.exe -NoProfile -File $validatorScript -SkillDirectory $invalidSkillRoot 2>&1) | Out-String)
+        $invalidValidatorExit = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $savedErrorActionPreference
+    }
+    Assert-True ($invalidValidatorResult -match 'INVALID_SKILL') 'The repository validator rejects malformed frontmatter.'
+    Assert-True ($invalidValidatorExit -ne 0) 'Malformed Skill validation returns a nonzero exit code.'
 
     $directExecute = ((& powershell.exe -NoProfile -File $deleteScript -Paths $directExecutePath -Execute 2>&1) | Out-String)
     Assert-True ($directExecute -match 'BLOCK.*PlanToken') 'Execute refuses to run without a preview PlanToken.'
@@ -452,6 +509,18 @@ try {
     $whatIf = ((& powershell.exe -NoProfile -File $deleteScript -Paths $whatIfPath -PlanToken $whatIfToken -Execute -WhatIf 2>&1) | Out-String)
     Assert-True ($whatIf -match '(?m)^SKIP\s+') 'WhatIf declines the destructive operation.'
     Assert-True ([IO.File]::Exists($whatIfPath)) 'WhatIf leaves the temporary fixture unchanged.'
+
+    $jsonWhatIfPreviewText = ((& powershell.exe -NoProfile -File $deleteScript -Paths $whatIfPath -OutputFormat Json 2>&1) | Out-String)
+    $jsonWhatIfPreview = ConvertFrom-TestJson -Text $jsonWhatIfPreviewText
+    $jsonWhatIfToken = if ($null -ne $jsonWhatIfPreview) { [string]$jsonWhatIfPreview.plan_token } else { '' }
+    $jsonWhatIfText = ((& powershell.exe -NoProfile -File $deleteScript -Paths $whatIfPath -PlanToken $jsonWhatIfToken -Execute -WhatIf -OutputFormat Json 2>&1) | Out-String)
+    $jsonWhatIf = ConvertFrom-TestJson -Text $jsonWhatIfText
+    Assert-True ($null -ne $jsonWhatIf) 'JSON WhatIf output remains valid JSON.'
+    if ($null -ne $jsonWhatIf) {
+        Assert-True (@($jsonWhatIf.events | Where-Object { $_.status -eq 'SKIP' }).Count -eq 1) 'JSON WhatIf exposes a structured SKIP event.'
+        Assert-True ($jsonWhatIf.summary.failed -eq 1) 'JSON WhatIf exposes structured failure counts.'
+    }
+    Assert-True ([IO.File]::Exists($whatIfPath)) 'JSON WhatIf leaves the temporary fixture unchanged.'
 
     $executePreview = ((& powershell.exe -NoProfile -File $deleteScript -Paths $executePath 2>&1) | Out-String)
     $executeToken = Get-PlanToken -Text $executePreview
@@ -574,3 +643,4 @@ if ($failures.Count -gt 0) {
 
 Write-Output 'PASSED: all safety tests'
 exit 0
+
