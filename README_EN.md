@@ -8,15 +8,17 @@ Windows Cleaner is a Windows disk-space analysis and safety-focused cleanup Skil
 > Deletion bypasses the Recycle Bin. Keep every file or directory whose purpose is unclear and ask the user before proceeding.
 
 > [!IMPORTANT]
-> **After presenting the risk list, discuss every item in detail before deciding whether to delete it.** The agent must explain and confirm each item's purpose, deletion consequences, recoverability, and whether removal could cause lost settings or offline data, require signing in or downloading data again, rebuild indexes, or disrupt an application. Do not enter deletion preview until the user gives a clear answer. Keep the item when the answer remains unclear or its impact cannot be verified. Never skip these questions merely because a name looks like a cache or because the model assumes it is safe.
+> **After presenting the risk list, resolve every item marked as requiring confirmation.** The agent must discuss unclear items in detail, including their purpose, deletion consequences, and recoverability. These items must not enter deletion preview until the user gives a clear answer; keep them when their impact remains uncertain. Candidates whose purpose and impact are already supported by reliable evidence must still be shown with their risks and approved individually, but the user need not repeat information that is already clear.
 
 ## Highlights
 
 - Read-only by default.
+- Whole-drive scanning supports controlled parallelism, main-thread progress, and bounded access-error samples.
 - Requires a snapshot-bound `PLAN_TOKEN` before execution.
-- Blocks drive roots, system locations, personal-data trees, projects, sensitive configuration, and reparse points.
+- Blocks drive roots, system locations, personal-data roots, AppData first-level roots, projects, sensitive configuration, and reparse points.
 - Accepts user-supplied protected paths through `-ProtectedPaths`.
 - Rejects execution when a target changes after preview.
+- Supports stable structured JSON output for deletion results.
 - Never elevates privileges or bypasses PowerShell execution policy.
 - Includes repeatable PowerShell safety tests.
 
@@ -34,9 +36,14 @@ The workflow is not tied to one agent. `agents/openai.yaml` contains optional Co
 skills/windows-cleaner/
 ├── SKILL.md
 ├── agents/openai.yaml
-├── scripts/scan.ps1
-├── scripts/delete.ps1
-└── tests/safety.ps1
+├── scripts/
+│   ├── scan-common.ps1
+│   ├── scan-disk.ps1
+│   ├── scan.ps1
+│   └── delete.ps1
+└── tests/
+    ├── safety.ps1
+    └── validate-skill.ps1
 ```
 
 ## Installation
@@ -73,8 +80,11 @@ Use $windows-cleaner to analyze drive C. Produce recommendations only and do not
 Run the read-only scanner directly:
 
 ```powershell
+powershell -NoProfile -File ".\skills\windows-cleaner\scripts\scan-disk.ps1" -Drive "C:\" -Top 30 -Threads 8
 powershell -NoProfile -File ".\skills\windows-cleaner\scripts\scan.ps1" -Paths "C:\Users\<user>\AppData\Local\Temp"
 ```
+
+`scan-disk.ps1` reports progress as root-level entries finish and emits a bounded set of `ERROR_SAMPLE` diagnostics. Use `-NoProgress` to suppress progress or `-ErrorSampleLimit 0` to suppress samples without changing the complete error count.
 
 The deletion script previews by default:
 
@@ -82,11 +92,14 @@ The deletion script previews by default:
 powershell -NoProfile -File ".\skills\windows-cleaner\scripts\delete.ps1" -Paths "C:\verified-cache-directory"
 ```
 
+Automation can pass `-OutputFormat Json`. Combining it with `-WhatIf` still produces one parseable JSON document and records the skipped operation as a structured `SKIP` event.
+
 Execution is allowed only after the user explicitly approves the exact normalized path shown in preview and the agent returns the emitted `PLAN_TOKEN`. See [`SKILL.md`](skills/windows-cleaner/SKILL.md) for the complete authorization protocol, safety boundaries, and result codes.
 
 ## Tests
 
 ```powershell
+powershell -NoProfile -File ".\skills\windows-cleaner\tests\validate-skill.ps1"
 powershell -NoProfile -File ".\skills\windows-cleaner\tests\safety.ps1"
 ```
 

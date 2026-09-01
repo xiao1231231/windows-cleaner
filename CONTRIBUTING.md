@@ -7,13 +7,14 @@
 1. 从独立分支提交范围明确的修改。
 2. 不要弱化默认只读、逐项批准、`PLAN_TOKEN`、保护路径、reparse point 或快照复验机制。
 3. 不要在文档、Skill 指令或脚本中增加绕过 `scripts/delete.ps1` 的裸删除命令。
-4. 修改 `scripts/delete.ps1`、`scripts/scan.ps1` 或安全规则时，同步增加或更新 `tests/safety.ps1`。
+4. 修改 `scripts/delete.ps1`、任一扫描脚本或安全规则时，同步增加或更新 `tests/safety.ps1`。
 5. 在 Windows PowerShell 5.1 中运行完整测试。
 6. 在拉取请求中说明风险、行为变化和验证结果。
 
 ## 本地验证
 
 ```powershell
+powershell -NoProfile -File ".\skills\windows-cleaner\tests\validate-skill.ps1"
 powershell -NoProfile -File ".\skills\windows-cleaner\tests\safety.ps1"
 ```
 

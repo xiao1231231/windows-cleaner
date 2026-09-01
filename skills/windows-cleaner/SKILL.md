@@ -14,7 +14,7 @@ description: Windows 磁盘空间分析与安全清理。用于检查本地磁�
 1. 默认只读。未经用户对规范化后的完整路径逐项批准，不执行删除。
 2. 只处理本地 `FileSystem` 路径。拒绝注册表、证书等其他 PowerShell Provider、相对路径和盘符根目录。
 3. 不提升管理员权限，不绕过访问控制，不使用 `-ExecutionPolicy Bypass`，也不由 Agent 自行改成 `RemoteSigned` 等执行策略。若系统策略阻止脚本运行，停止操作并请用户或管理员处理；失败属于安全停止，不改用其他删除命令。
-4. 不直接删除 Windows、Program Files、ProgramData、用户目录根、Downloads 根、OneDrive 根、公共文档、桌面、文档、图片、音乐、视频、收藏夹、项目目录、`.vscode`、Keil 目录，或 `.ssh`、`.git`、`.svn`、`.hg`、`.claude`、`.codex`、`.gnupg`、`.env`、`.npmrc` 等敏感配置。此列表是基础保护项；主动提醒用户可以自行补充需要保护的文件或目录。把用户补充项记录为规范化的绝对路径，并在每次预览和执行时通过 `-ProtectedPaths` 原样传给删除脚本。
+4. 不直接删除 Windows、Program Files、ProgramData、用户目录根、Downloads 根、OneDrive 根、`AppData` 根及其 `Local`、`Roaming`、`LocalLow` 一级根目录、公共文档、桌面、文档、图片、音乐、视频、收藏夹、项目目录、`.vscode`、Keil 目录，或 `.ssh`、`.git`、`.svn`、`.hg`、`.claude`、`.codex`、`.gnupg`、`.env`、`.npmrc` 等敏感配置。AppData 的具体下级缓存仍可在用途明确后逐项预览，不能把整个 AppData 一级根作为清理目标。此列表是基础保护项；主动提醒用户可以自行补充需要保护的文件或目录。把用户补充项记录为规范化的绝对路径，并在每次预览和执行时通过 `-ProtectedPaths` 原样传给删除脚本。
 5. 不直接删除 `pagefile.sys`、`hiberfil.sys`、`swapfile.sys`、System Volume Information、Recovery、Boot、EFI、WinSxS、Windows Update 组件或系统还原数据。需要处理时说明影响并使用 Windows 官方设置、Storage Sense、`powercfg` 或 DISM 等受支持机制。
 6. 不把扩展名、目录名或注册表中的安装记录单独作为“可安全删除”的证据。
 7. 路径显示乱码、扫描不完整、身份不明或安全检查返回 `BLOCK`/`INVALID` 时停止，不自行绕过。
@@ -122,7 +122,7 @@ $userProtected = @("D:\keep-a", "D:\keep-b")
 
 快照使用路径、类型、大小、时间戳和属性检测预览后的变化，不读取或散列文件内容。树检查采用流式枚举，只保存待遍历目录，不把平目录的全部子项一次性载入内存；任一枚举或元数据访问错误仍立即失败关闭。预览后让相关应用保持关闭；如果内容变化，脚本会 `BLOCK` 并要求重新预览。执行模式还会在任何删除发生前，对整批目标逐项做只读删除权限和共享占用预检；全部通过时输出 `ACCESS_OK`，其中 `checked_items` 是权限预检实际检查的项目数并包含目标本身。任一项缺少有效删除权限或被不共享删除的句柄锁定时整批 `BLOCK`。该预检能避免已知权限/占用问题造成的部分删除，但无法消除预检之后发生的极窄竞争窗口，因此仍不要在活跃写入目录中执行整树删除。
 
-自动化消费者需要稳定字段时，可在预览和执行两次调用中都传 `-OutputFormat Json`；默认 `Text` 保持面向人工的既有状态行。JSON 顶层包含 `schema_version`、`mode`、`events`、`plan_token` 和 `summary`，事件使用 `status`、`path`、`reason`、`child_count`、`checked_items`、`snapshot`。JSON 只改变输出格式，不改变令牌绑定、逐项批准、整批权限预检或任何保护边界；同一批预览与执行仍必须使用完全相同的路径和保护列表。
+自动化消费者需要稳定字段时，可在预览和执行两次调用中都传 `-OutputFormat Json`；默认 `Text` 保持面向人工的既有状态行。JSON 顶层包含 `schema_version`、`mode`、`events`、`plan_token` 和 `summary`，事件使用 `status`、`path`、`reason`、`child_count`、`checked_items`、`snapshot`。JSON 与 `-WhatIf` 组合时仍只输出一个可解析的 JSON 文档，并以结构化 `SKIP` 事件表示未执行。JSON 只改变输出格式，不改变令牌绑定、逐项批准、整批权限预检或任何保护边界；同一批预览与执行仍必须使用完全相同的路径和保护列表。
 
 结果含义：
 

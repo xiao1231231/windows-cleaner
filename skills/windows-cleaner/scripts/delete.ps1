@@ -370,6 +370,22 @@ function Get-ProtectedReason {
         Add-UniquePath -List $profileParentPaths -Path $profileParent
         Add-UniquePath -List $protectedRoots -Path $profileParent
         Add-UniquePath -List $protectedRoots -Path (Join-Path $profilePath 'Downloads')
+        $appDataRoot = Join-Path $profilePath 'AppData'
+        Add-UniquePath -List $protectedRoots -Path $appDataRoot
+        Add-UniquePath -List $protectedRoots -Path (Join-Path $appDataRoot 'Local')
+        Add-UniquePath -List $protectedRoots -Path (Join-Path $appDataRoot 'Roaming')
+        Add-UniquePath -List $protectedRoots -Path (Join-Path $appDataRoot 'LocalLow')
+    }
+    foreach ($applicationDataPath in @(
+        (Get-SpecialFolderPath -Name 'ApplicationData'),
+        (Get-SpecialFolderPath -Name 'LocalApplicationData')
+    )) {
+        Add-UniquePath -List $protectedRoots -Path $applicationDataPath
+        if (-not [string]::IsNullOrWhiteSpace($applicationDataPath)) {
+            $appDataParent = Split-Path -Parent $applicationDataPath
+            Add-UniquePath -List $protectedRoots -Path $appDataParent
+            Add-UniquePath -List $protectedRoots -Path (Join-Path $appDataParent 'LocalLow')
+        }
     }
     foreach ($oneDrivePath in @($env:OneDrive, $env:OneDriveConsumer, $env:OneDriveCommercial)) {
         Add-UniquePath -List $protectedRoots -Path $oneDrivePath
@@ -943,6 +959,14 @@ for ($targetIndex = 0; $targetIndex -lt $validations.Count; $targetIndex++) {
         continue
     }
 
+    # ShouldProcess writes its own human-readable WhatIf message before
+    # returning. In JSON mode, handle WhatIf directly so stdout remains a
+    # single parseable JSON document.
+    if ($OutputFormat -eq 'Json' -and $WhatIfPreference) {
+        Add-DeleteEvent -Status 'SKIP' -Path $finalValidation.Path -Reason 'ShouldProcess declined by WhatIf'
+        $failed++
+        continue
+    }
     if (-not $PSCmdlet.ShouldProcess($finalValidation.Path, 'Permanently delete approved path')) {
         Add-DeleteEvent -Status 'SKIP' -Path $finalValidation.Path -Reason 'ShouldProcess declined'
         $failed++

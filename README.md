@@ -8,15 +8,17 @@ Windows Cleaner 是一个面向 AI Agent 的 Windows 磁盘空间分析与安全
 > 删除操作不经过回收站。任何用途不明的文件或目录都应默认保留，并先向用户确认。
 
 > [!IMPORTANT]
-> **列出风险清单后，必须逐项详细询问再决定是否删除。** Agent 应向用户说明并确认每一项的具体用途、删除后果、可恢复性，以及是否会导致配置或离线数据丢失、重新登录、重新下载、重建索引或应用异常。用户明确回答前不得进入删除预览；回答仍不清楚或无法确认时默认保留。不得仅凭“看起来像缓存”、文件名或大模型自身判断跳过询问，以防模型误判造成重要数据丢失。
+> **列出风险清单后，必须先处理所有“待确认”项。** Agent 应对用途不明确的项目详细说明并询问其具体用途、删除后果和可恢复性。用户明确回答前，这些项目不得进入删除预览；回答仍不清楚或无法确认时默认保留。用途和影响已有可靠依据的候选项仍须展示风险并取得逐项批准，但不要求用户重复确认已经明确的信息。
 
 ## 主要特点
 
 - 默认只读，不会在扫描阶段删除文件。
+- 整盘扫描支持受控并行、主线程进度和有限访问错误样本。
 - 删除前必须生成绑定目标快照的 `PLAN_TOKEN`。
-- 拒绝磁盘根目录、系统目录、个人资料目录、项目目录、敏感配置和 reparse point。
+- 拒绝磁盘根目录、系统目录、个人资料根、AppData 一级根、项目目录、敏感配置和 reparse point。
 - 支持用户通过 `-ProtectedPaths` 补充受保护路径。
 - 预览后目标发生变化时拒绝执行，要求重新扫描和确认。
+- 删除结果可选择稳定的 JSON 输出，包含结构化状态和计数。
 - 不提升管理员权限，不绕过 PowerShell 执行策略。
 - 包含可重复运行的 PowerShell 安全测试。
 
@@ -34,9 +36,14 @@ Windows Cleaner 是一个面向 AI Agent 的 Windows 磁盘空间分析与安全
 skills/windows-cleaner/
 ├── SKILL.md
 ├── agents/openai.yaml
-├── scripts/scan.ps1
-├── scripts/delete.ps1
-└── tests/safety.ps1
+├── scripts/
+│   ├── scan-common.ps1
+│   ├── scan-disk.ps1
+│   ├── scan.ps1
+│   └── delete.ps1
+└── tests/
+    ├── safety.ps1
+    └── validate-skill.ps1
 ```
 
 ## 安装
@@ -73,8 +80,11 @@ Copy-Item -LiteralPath ".\skills\windows-cleaner" -Destination $destination -Rec
 只读扫描脚本也可以独立运行：
 
 ```powershell
+powershell -NoProfile -File ".\skills\windows-cleaner\scripts\scan-disk.ps1" -Drive "C:\" -Top 30 -Threads 8
 powershell -NoProfile -File ".\skills\windows-cleaner\scripts\scan.ps1" -Paths "C:\Users\<用户>\AppData\Local\Temp"
 ```
+
+`scan-disk.ps1` 默认输出一级目录完成进度，并用 `ERROR_SAMPLE` 展示有限数量的访问错误示例；`-NoProgress` 可关闭进度，`-ErrorSampleLimit 0` 可关闭样本而不影响完整错误计数。
 
 删除脚本默认只生成预览，不执行删除：
 
@@ -82,11 +92,14 @@ powershell -NoProfile -File ".\skills\windows-cleaner\scripts\scan.ps1" -Paths "
 powershell -NoProfile -File ".\skills\windows-cleaner\scripts\delete.ps1" -Paths "C:\待确认的缓存目录"
 ```
 
+自动化调用可加 `-OutputFormat Json`。它与 `-WhatIf` 组合时仍输出单个可解析 JSON 文档，并用结构化 `SKIP` 状态表示未执行。
+
 只有用户明确批准预览中原样显示的完整路径后，Agent 才能使用返回的 `PLAN_TOKEN` 执行。完整授权流程、安全边界和结果状态请以 [`SKILL.md`](skills/windows-cleaner/SKILL.md) 为准。
 
 ## 测试
 
 ```powershell
+powershell -NoProfile -File ".\skills\windows-cleaner\tests\validate-skill.ps1"
 powershell -NoProfile -File ".\skills\windows-cleaner\tests\safety.ps1"
 ```
 
