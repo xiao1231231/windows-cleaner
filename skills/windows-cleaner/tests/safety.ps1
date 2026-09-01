@@ -268,14 +268,11 @@ try {
     $roamingAppDataRoot = Join-Path $appDataRoot 'Roaming'
     $localLowAppDataRoot = Join-Path $appDataRoot 'LocalLow'
     $approvedCache = Join-Path $localAppDataRoot 'Temp\approved-cache'
-    $otherProfile = Join-Path (Split-Path -Parent $testProfile) 'other-profile'
     [IO.Directory]::CreateDirectory($downloadsRoot) | Out-Null
     [IO.Directory]::CreateDirectory($roamingAppDataRoot) | Out-Null
     [IO.Directory]::CreateDirectory($localLowAppDataRoot) | Out-Null
     [IO.Directory]::CreateDirectory($approvedCache) | Out-Null
-    [IO.Directory]::CreateDirectory($otherProfile) | Out-Null
     [IO.File]::WriteAllText($downloadsChild, 'fixture')
-    [IO.File]::WriteAllText((Join-Path $otherProfile 'personal-data.tmp'), 'fixture')
     $savedUserProfile = $env:USERPROFILE
     try {
         $env:USERPROFILE = $testProfile
@@ -286,7 +283,6 @@ try {
         $roamingAppDataRootResult = Invoke-Text { & $deleteScript -Paths $roamingAppDataRoot }
         $localLowAppDataRootResult = Invoke-Text { & $deleteScript -Paths $localLowAppDataRoot }
         $approvedCacheResult = Invoke-Text { & $deleteScript -Paths $approvedCache }
-        $otherProfileResult = Invoke-Text { & $deleteScript -Paths $otherProfile }
     } finally {
         $env:USERPROFILE = $savedUserProfile
     }
@@ -297,7 +293,6 @@ try {
     Assert-True ($roamingAppDataRootResult -match 'BLOCK.*personal-data root') 'Delete rejects the Roaming AppData root itself.'
     Assert-True ($localLowAppDataRootResult -match 'BLOCK.*personal-data root') 'Delete rejects the LocalLow AppData root itself.'
     Assert-True ($approvedCacheResult -match 'PLAN') 'AppData descendants remain eligible for individual approval.'
-    Assert-True ($otherProfileResult -match 'BLOCK.*other user profile') 'Delete rejects another user profile tree.'
 
     if ($substCreated) {
         $criticalRootFile = $substLetter + ':\pagefile.sys'
@@ -443,6 +438,21 @@ try {
         }
         Assert-True ($diskParallelProcess -match 'COMPLETE.*scope=disk.*files=3 dirs=2 skipped_reparse=0 errors=0 workers=2') 'Disk scan reports and honors an explicit parallel worker count.'
         Assert-True ($diskParallelExit -eq 0) 'A parallel disk scan returns exit code 0 for a complete scan.'
+
+        $profileFixturesRoot = $substLetter + ':\profile-fixtures'
+        $substCurrentProfile = Join-Path $profileFixturesRoot 'current-user'
+        $substOtherProfile = Join-Path $profileFixturesRoot 'other-user'
+        [IO.Directory]::CreateDirectory($substCurrentProfile) | Out-Null
+        [IO.Directory]::CreateDirectory($substOtherProfile) | Out-Null
+        [IO.File]::WriteAllText((Join-Path $substOtherProfile 'personal-data.tmp'), 'fixture')
+        $savedUserProfile = $env:USERPROFILE
+        try {
+            $env:USERPROFILE = $substCurrentProfile
+            $otherProfileResult = Invoke-Text { & $deleteScript -Paths $substOtherProfile }
+        } finally {
+            $env:USERPROFILE = $savedUserProfile
+        }
+        Assert-True ($otherProfileResult -match 'BLOCK.*other user profile') 'Delete rejects another user profile tree.'
     }
 
     . $scanCommonScript
