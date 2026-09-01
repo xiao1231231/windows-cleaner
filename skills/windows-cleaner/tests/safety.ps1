@@ -10,11 +10,23 @@ $diskScanScript = Join-Path $skillRoot 'scripts\scan-disk.ps1'
 $validatorScript = Join-Path $skillRoot 'tests\validate-skill.ps1'
 $failures = [System.Collections.Generic.List[string]]::new()
 
+function Write-CiError {
+    param([string]$Message)
+
+    if ($env:GITHUB_ACTIONS -ne 'true') {
+        return
+    }
+
+    $escapedMessage = $Message.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+    Write-Output ("::error title=Windows Cleaner safety test::" + $escapedMessage)
+}
+
 function Assert-True {
     param([bool]$Condition, [string]$Message)
     if (-not $Condition) {
         $failures.Add($Message)
         Write-Output ("FAIL  " + $Message)
+        Write-CiError -Message $Message
     } else {
         Write-Output ("PASS  " + $Message)
     }
@@ -621,3 +633,4 @@ if ($failures.Count -gt 0) {
 
 Write-Output 'PASSED: all safety tests'
 exit 0
+
