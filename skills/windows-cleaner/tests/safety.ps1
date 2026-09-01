@@ -4,7 +4,9 @@ param()
 $ErrorActionPreference = 'Stop'
 $skillRoot = Split-Path -Parent $PSScriptRoot
 $deleteScript = Join-Path $skillRoot 'scripts\delete.ps1'
+$scanCommonScript = Join-Path $skillRoot 'scripts\scan-common.ps1'
 $scanScript = Join-Path $skillRoot 'scripts\scan.ps1'
+$diskScanScript = Join-Path $skillRoot 'scripts\scan-disk.ps1'
 $failures = [System.Collections.Generic.List[string]]::new()
 
 function Assert-True {
@@ -29,12 +31,23 @@ function Get-PlanToken {
     return ''
 }
 
+function ConvertFrom-TestJson {
+    param([string]$Text)
+    try {
+        return ($Text | ConvertFrom-Json -ErrorAction Stop)
+    } catch {
+        return $null
+    }
+}
+
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) ("windows-cleaner-test-" + [guid]::NewGuid().ToString('N'))
 [IO.Directory]::CreateDirectory($testRoot) | Out-Null
 $commaPath = Join-Path $testRoot 'cache,old.tmp'
 [IO.File]::WriteAllText($commaPath, 'fixture')
 $executePath = Join-Path $testRoot 'execute.tmp'
 [IO.File]::WriteAllText($executePath, 'fixture')
+$jsonExecutePath = Join-Path $testRoot 'json-execute.tmp'
+[IO.File]::WriteAllText($jsonExecutePath, 'fixture')
 $whatIfPath = Join-Path $testRoot 'whatif.tmp'
 [IO.File]::WriteAllText($whatIfPath, 'fixture')
 $confirmPath = Join-Path $testRoot 'confirm-preference.tmp'
@@ -46,6 +59,21 @@ $tamperedTokenPath = Join-Path $testRoot 'tampered-token.tmp'
 $changingPath = Join-Path $testRoot 'changing-cache'
 [IO.Directory]::CreateDirectory($changingPath) | Out-Null
 [IO.File]::WriteAllText((Join-Path $changingPath 'old.cache'), 'fixture')
+$countTree = Join-Path $testRoot 'count-tree'
+$countTreeChild = Join-Path $countTree 'child'
+[IO.Directory]::CreateDirectory($countTreeChild) | Out-Null
+[IO.File]::WriteAllText((Join-Path $countTreeChild 'one.tmp'), 'fixture')
+$lockedTree = Join-Path $testRoot 'locked-tree'
+$lockedFile = Join-Path $lockedTree 'locked.tmp'
+[IO.Directory]::CreateDirectory($lockedTree) | Out-Null
+[IO.File]::WriteAllText($lockedFile, 'fixture')
+$aclDeleteTree = Join-Path $testRoot 'acl-delete-tree'
+$aclDeleteFile = Join-Path $aclDeleteTree 'denied.tmp'
+[IO.Directory]::CreateDirectory($aclDeleteTree) | Out-Null
+[IO.File]::WriteAllText($aclDeleteFile, 'fixture')
+$aclInspectTree = Join-Path $testRoot 'acl-inspect-tree'
+[IO.Directory]::CreateDirectory($aclInspectTree) | Out-Null
+[IO.File]::WriteAllText((Join-Path $aclInspectTree 'hidden.tmp'), 'fixture')
 $sensitiveDirectory = Join-Path $testRoot '.ssh'
 [IO.Directory]::CreateDirectory($sensitiveDirectory) | Out-Null
 [IO.File]::WriteAllText((Join-Path $sensitiveDirectory 'id_ed25519'), 'fixture')
@@ -92,6 +120,12 @@ try {
 $substRoot = Join-Path $testRoot 'subst-root'
 [IO.Directory]::CreateDirectory($substRoot) | Out-Null
 [IO.File]::WriteAllText((Join-Path $substRoot 'pagefile.sys'), 'fixture')
+$substParallelA = Join-Path $substRoot 'parallel-a'
+$substParallelB = Join-Path $substRoot 'parallel-b'
+[IO.Directory]::CreateDirectory($substParallelA) | Out-Null
+[IO.Directory]::CreateDirectory($substParallelB) | Out-Null
+[IO.File]::WriteAllText((Join-Path $substParallelA 'a.tmp'), 'fixture-a')
+[IO.File]::WriteAllText((Join-Path $substParallelB 'b.tmp'), 'fixture-b')
 $substLetter = $null
 $substCreated = $false
 foreach ($candidateLetter in [char[]]'ZYXWVUTSRQPONMLKJIHGFED') {
@@ -126,11 +160,29 @@ try {
     Assert-True ($preview -match 'PLAN') 'Delete defaults to preview mode.'
     Assert-True ($global:SafetyTestRemoveCalls.Count -eq 0) 'Preview never calls Remove-Item.'
     Assert-True ($preview -notmatch 'MISSING') 'A comma in a valid path is not split.'
+    Assert-True ($preview -match 'child_count=0') 'Preview reports a file target with an explicit child_count of zero.'
+    $countPreview = Invoke-Text { & $deleteScript -Paths $countTree }
+    Assert-True ($countPreview -match 'child_count=2') 'Preview child_count includes directory descendants but excludes the target root.'
+
+    $jsonPreviewText = Invoke-Text { & $deleteScript -Paths $commaPath -OutputFormat Json }
+    $jsonPreview = ConvertFrom-TestJson -Text $jsonPreviewText
+    Assert-True ($null -ne $jsonPreview) 'JSON preview output is valid JSON.'
+    if ($null -ne $jsonPreview) {
+        Assert-True ($jsonPreview.schema_version -eq 1) 'JSON preview declares schema version 1.'
+        Assert-True ($jsonPreview.mode -eq 'preview') 'JSON preview identifies preview mode.'
+        Assert-True ($jsonPreview.events[0].status -eq 'PLAN') 'JSON preview exposes a structured PLAN event.'
+        Assert-True ($jsonPreview.events[0].child_count -eq 0) 'JSON preview uses child_count for snapshot traversal.'
+        Assert-True (-not [string]::IsNullOrWhiteSpace([string]$jsonPreview.plan_token)) 'JSON preview exposes the PlanToken as a top-level field.'
+        Assert-True ($jsonPreview.summary.planned -eq 1) 'JSON preview exposes structured summary counts.'
+    }
 
     $global:SafetyTestRemoveCalls.Clear()
     $provider = Invoke-Text { & $deleteScript -Paths 'HKCU:\Environment' }
     Assert-True ($provider -match 'BLOCK.*FileSystem') 'Delete rejects non-FileSystem providers.'
     Assert-True ($global:SafetyTestRemoveCalls.Count -eq 0) 'Provider rejection never calls Remove-Item.'
+    $jsonBlockedText = Invoke-Text { & $deleteScript -Paths 'HKCU:\Environment' -OutputFormat Json }
+    $jsonBlocked = ConvertFrom-TestJson -Text $jsonBlockedText
+    Assert-True ($null -ne $jsonBlocked -and $jsonBlocked.summary.blocked -gt 0) 'JSON output remains valid for a blocked preview.'
 
     $global:SafetyTestRemoveCalls.Clear()
     $driveRoot = Invoke-Text { & $deleteScript -Paths ([IO.Path]::GetPathRoot($testRoot)) }
@@ -195,14 +247,10 @@ try {
     }
     Assert-True ($protectedParentResult -match 'BLOCK.*contains protected') 'Delete rejects a parent containing a built-in protected tree.'
 
-    $profileFixtureRoot = Join-Path $testRoot 'profile-fixture'
-    if ($substCreated) {
-        $profileFixtureRoot = $substLetter + ':\profile-fixture'
-    }
-    $testProfile = Join-Path $profileFixtureRoot 'test-profile'
+    $testProfile = Join-Path $testRoot 'test-profile'
     $downloadsRoot = Join-Path $testProfile 'Downloads'
     $downloadsChild = Join-Path $downloadsRoot 'approved-installer.tmp'
-    $otherProfile = Join-Path $profileFixtureRoot 'other-profile'
+    $otherProfile = Join-Path (Split-Path -Parent $testProfile) 'other-profile'
     [IO.Directory]::CreateDirectory($downloadsRoot) | Out-Null
     [IO.Directory]::CreateDirectory($otherProfile) | Out-Null
     [IO.File]::WriteAllText($downloadsChild, 'fixture')
@@ -218,14 +266,7 @@ try {
     }
     Assert-True ($downloadsRootResult -match 'BLOCK.*personal-data root') 'Delete rejects the Downloads root itself.'
     Assert-True ($downloadsChildResult -match 'PLAN') 'Downloads descendants remain eligible for individual approval.'
-    if ($substCreated) {
-        if ($otherProfileResult -notmatch 'BLOCK.*other user profile') {
-            Write-Output ('DIAGNOSTIC other-profile result: ' + $otherProfileResult.Trim())
-        }
-        Assert-True ($otherProfileResult -match 'BLOCK.*other user profile') 'Delete rejects another user profile tree.'
-    } else {
-        Write-Output 'SKIP  Other-user profile isolation requires a temporary subst drive.'
-    }
+    Assert-True ($otherProfileResult -match 'BLOCK.*other user profile') 'Delete rejects another user profile tree.'
 
     if ($substCreated) {
         $criticalRootFile = $substLetter + ':\pagefile.sys'
@@ -252,18 +293,66 @@ try {
         $global:SafetyTestRemoveCalls.Clear()
         $junctionTargetResult = Invoke-Text { & $deleteScript -Paths $junctionPath }
         Assert-True ($junctionTargetResult -match 'BLOCK.*target is a junction') 'Delete rejects a reparse-point target.'
+        $junctionDescendant = Join-Path $junctionPath 'target-data.tmp'
+        $junctionDescendantDeleteResult = Invoke-Text { & $deleteScript -Paths $junctionDescendant }
+        Assert-True ($junctionDescendantDeleteResult -match 'BLOCK.*path contains.*reparse point') 'Delete rejects a regular target reached through a reparse-point ancestor.'
         $junctionParentResult = Invoke-Text { & $deleteScript -Paths $junctionParent }
         Assert-True ($junctionParentResult -match 'BLOCK.*contains reparse point') 'Delete rejects a tree containing a reparse point.'
         Assert-True ($global:SafetyTestRemoveCalls.Count -eq 0) 'Reparse-point rejection never calls Remove-Item.'
     }
 
-    function global:Get-ChildItem { throw 'simulated enumeration failure' }
+    $aclInspectSddl = $null
+    $aclInspectApplied = $false
     try {
-        $inspectionFailure = Invoke-Text { & $deleteScript -Paths $testRoot }
+        $aclInspectAcl = Get-Acl -LiteralPath $aclInspectTree
+        $aclInspectSddl = $aclInspectAcl.GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::All)
+        $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+        $inspectDeny = New-Object Security.AccessControl.FileSystemAccessRule(
+            $currentSid,
+            [Security.AccessControl.FileSystemRights]::ReadData,
+            [Security.AccessControl.InheritanceFlags]::None,
+            [Security.AccessControl.PropagationFlags]::None,
+            [Security.AccessControl.AccessControlType]::Deny
+        )
+        $aclInspectAcl.AddAccessRule($inspectDeny)
+        Set-Acl -LiteralPath $aclInspectTree -AclObject $aclInspectAcl
+        $probeEnumerator = $null
+        try {
+            $probeEnumerator = [IO.DirectoryInfo]::new($aclInspectTree).EnumerateFileSystemInfos().GetEnumerator()
+            $null = $probeEnumerator.MoveNext()
+            $aclInspectApplied = $false
+        } catch [UnauthorizedAccessException] {
+            $aclInspectApplied = $true
+        } finally {
+            if ($null -ne $probeEnumerator) { $probeEnumerator.Dispose() }
+        }
+        if ($aclInspectApplied) {
+            $inspectionFailure = Invoke-Text { & $deleteScript -Paths $aclInspectTree }
+            Assert-True ($inspectionFailure -match 'BLOCK.*cannot fully inspect') 'Delete fails closed when streaming tree inspection is denied by an ACL.'
+            . $scanCommonScript
+            $sampledMeasurement = Measure-WindowsCleanerTree -FullPath $aclInspectTree -ErrorSampleLimit 1
+            $unsampledMeasurement = Measure-WindowsCleanerTree -FullPath $aclInspectTree -ErrorSampleLimit 0
+            Assert-True ($sampledMeasurement.Errors -gt 0) 'A denied scan increments the complete error counter.'
+            Assert-True (@($sampledMeasurement.ErrorSamples).Count -eq 1) 'A denied scan returns a bounded error sample with its path and reason.'
+            Assert-True (@($unsampledMeasurement.ErrorSamples).Count -eq 0) 'Error samples can be disabled without disabling error counting.'
+            Assert-True ($sampledMeasurement.Errors -eq $unsampledMeasurement.Errors) 'Error sampling does not change the total error count.'
+        } else {
+            Write-Output 'SKIP  The filesystem did not enforce the temporary list-directory deny ACL.'
+        }
+    } catch {
+        Write-Output ('SKIP  The list-directory deny ACL fixture could not be established: ' + $_.Exception.Message)
     } finally {
-        Microsoft.PowerShell.Management\Remove-Item function:\Get-ChildItem -ErrorAction SilentlyContinue
+        if ($null -ne $aclInspectSddl) {
+            try {
+                $restoreAcl = Get-Acl -LiteralPath $aclInspectTree
+                $restoreAcl.SetSecurityDescriptorSddlForm($aclInspectSddl)
+                Set-Acl -LiteralPath $aclInspectTree -AclObject $restoreAcl
+            } catch {
+                Write-Output ('FAIL  The list-directory fixture ACL could not be restored: ' + $_.Exception.Message)
+                $failures.Add('The list-directory fixture ACL could not be restored.')
+            }
+        }
     }
-    Assert-True ($inspectionFailure -match 'BLOCK.*cannot fully inspect') 'Delete fails closed when tree inspection is incomplete.'
 
     $scanProvider = Invoke-Text { & $scanScript -Paths 'HKCU:\Environment' }
     Assert-True ($scanProvider -match 'INVALID.*FileSystem') 'Scan rejects non-FileSystem providers.'
@@ -271,15 +360,91 @@ try {
     $scanComma = Invoke-Text { & $scanScript -Paths $commaPath }
     Assert-True ($scanComma -match 'COMPLETE') 'Scan accepts a literal path containing a comma.'
     Assert-True ($scanComma -notmatch 'INVALID|MISSING') 'Scan does not split a comma-containing path.'
+    Assert-True ($scanComma -match 'files=1 dirs=0 skipped_reparse=0 errors=0') 'Scan reports exact counters for a regular file.'
+
+    $scanCompleteProcess = ((& powershell.exe -NoProfile -File $scanScript -Paths $commaPath 2>&1) | Out-String)
+    $scanCompleteExit = $LASTEXITCODE
+    Assert-True ($scanCompleteProcess -match 'COMPLETE') 'A complete scan reports COMPLETE in a child process.'
+    Assert-True ($scanCompleteExit -eq 0) 'A complete scan returns exit code 0.'
+
+    $scanRelative = Invoke-Text { & $scanScript -Paths 'relative-cache.tmp' }
+    Assert-True ($scanRelative -match 'INVALID.*absolute FileSystem path') 'Scan rejects relative paths.'
+
+    $scanInvalidProcess = ((& powershell.exe -NoProfile -File $scanScript -Paths 'relative-cache.tmp' 2>&1) | Out-String)
+    $scanInvalidExit = $LASTEXITCODE
+    Assert-True ($scanInvalidProcess -match 'INVALID') 'An invalid scan reports INVALID in a child process.'
+    Assert-True ($scanInvalidExit -eq 2) 'An invalid scan returns exit code 2.'
+
+    if ($junctionCreated) {
+        $scanJunctionTarget = Invoke-Text { & $scanScript -Paths $junctionPath }
+        Assert-True ($scanJunctionTarget -match 'INVALID.*target is a junction') 'Scan rejects a reparse-point target.'
+        $junctionDescendant = Join-Path $junctionPath 'target-data.tmp'
+        $scanJunctionDescendant = Invoke-Text { & $scanScript -Paths $junctionDescendant }
+        Assert-True ($scanJunctionDescendant -match 'INVALID.*path contains.*reparse point') 'Scan rejects a regular target reached through a reparse-point ancestor.'
+        $scanJunctionParent = Invoke-Text { & $scanScript -Paths $junctionParent }
+        Assert-True ($scanJunctionParent -match 'COMPLETE.*files=0 dirs=0 skipped_reparse=1 errors=0') 'Scan skips a child reparse point without traversing its target.'
+    }
+
+    $diskScanRelative = Invoke-Text { & $diskScanScript -Drive 'relative-drive' }
+    Assert-True ($diskScanRelative -match 'INVALID.*absolute local FileSystem drive root') 'Disk scan rejects relative paths.'
+    $diskInvalidProcess = ((& powershell.exe -NoProfile -File $diskScanScript -Drive 'relative-drive' 2>&1) | Out-String)
+    $diskInvalidExit = $LASTEXITCODE
+    Assert-True ($diskInvalidProcess -match 'INVALID') 'An invalid disk scan reports INVALID in a child process.'
+    Assert-True ($diskInvalidExit -eq 2) 'An invalid disk scan returns exit code 2.'
+    $diskScanDirectory = Invoke-Text { & $diskScanScript -Drive $testRoot }
+    Assert-True ($diskScanDirectory -match 'INVALID.*only a drive root') 'Disk scan rejects a non-root directory.'
+    $diskScanProvider = Invoke-Text { & $diskScanScript -Drive 'HKCU:\Environment' }
+    Assert-True ($diskScanProvider -match 'INVALID.*FileSystem') 'Disk scan rejects non-FileSystem providers.'
+    if ($substCreated) {
+        $diskScanRoot = Invoke-Text { & $diskScanScript -Drive ($substLetter + ':\') }
+        Assert-True ($diskScanRoot -match 'COMPLETE.*scope=disk.*files=3 dirs=2 skipped_reparse=0 errors=0') 'Disk scan measures a local drive root in one pass.'
+        Assert-True ($diskScanRoot -match '(?m)^PROGRESS\s+') 'Disk scan reports bounded main-thread progress.'
+        Assert-True ($diskScanRoot -match 'ENTRY\s+COMPLETE.*pagefile\.sys.*files=1 dirs=0 skipped_reparse=0 errors=0') 'Disk scan reports root entries without deleting or hiding protected filenames.'
+        $diskScanQuiet = Invoke-Text { & $diskScanScript -Drive ($substLetter + ':\') -NoProgress }
+        Assert-True ($diskScanQuiet -notmatch '(?m)^PROGRESS\s+') 'Disk scan progress can be disabled for automation.'
+        $savedErrorActionPreference = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            $diskParallelProcess = ((& powershell.exe -NoProfile -File $diskScanScript -Drive ($substLetter + ':\') -Threads 2 2>&1) | Out-String)
+            $diskParallelExit = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $savedErrorActionPreference
+        }
+        Assert-True ($diskParallelProcess -match 'COMPLETE.*scope=disk.*files=3 dirs=2 skipped_reparse=0 errors=0 workers=2') 'Disk scan reports and honors an explicit parallel worker count.'
+        Assert-True ($diskParallelExit -eq 0) 'A parallel disk scan returns exit code 0 for a complete scan.'
+    }
+
+    . $scanCommonScript
+    $exitCodeHelper = Get-Command Get-WindowsCleanerScanExitCode -ErrorAction SilentlyContinue
+    Assert-True ($null -ne $exitCodeHelper) 'Scan common code exposes a shared exit-code policy.'
+    if ($null -ne $exitCodeHelper) {
+        Assert-True ((Get-WindowsCleanerScanExitCode -HadInvalid $false -HadPartial $false) -eq 0) 'Exit-code policy maps complete scans to 0.'
+        Assert-True ((Get-WindowsCleanerScanExitCode -HadInvalid $true -HadPartial $false) -eq 2) 'Exit-code policy maps invalid scans to 2.'
+        Assert-True ((Get-WindowsCleanerScanExitCode -HadInvalid $false -HadPartial $true) -eq 3) 'Exit-code policy maps partial scans to 3.'
+        Assert-True ((Get-WindowsCleanerScanExitCode -HadInvalid $true -HadPartial $true) -eq 2) 'Invalid takes precedence over partial in the exit-code policy.'
+    }
 
     $skillText = [IO.File]::ReadAllText((Join-Path $skillRoot 'SKILL.md'), [Text.Encoding]::UTF8)
     Assert-True ($skillText -notmatch 'Remove-Item\s+-LiteralPath') 'SKILL.md does not provide a raw Remove-Item recipe.'
     Assert-True ($skillText -notmatch '(?i)powershell[^\r\n]*-ExecutionPolicy\s+Bypass') 'SKILL.md does not recommend ExecutionPolicy Bypass.'
     Assert-True ($skillText -match 'PLAN_TOKEN') 'SKILL.md documents the preview token protocol.'
+    $samePersistentTerminalText = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('5ZCM5LiA5Liq5oyB5LmF57uI56uv'))
+    Assert-True ($skillText -match [regex]::Escape($samePersistentTerminalText)) 'SKILL.md prefers preview and execute in one built-in persistent terminal.'
+    Assert-True ($skillText -match 'ACCESS_OK') 'SKILL.md documents the batch delete-access preflight.'
+    Assert-True ($skillText -match '\-Threads 1') 'SKILL.md documents the serial fallback for disk scanning.'
+    Assert-True ($skillText -match 'ERROR_SAMPLE') 'SKILL.md documents bounded scan error samples.'
+    Assert-True ($skillText -match 'child_count') 'SKILL.md documents snapshot child-count semantics.'
+    Assert-True ($skillText -match 'checked_items') 'SKILL.md documents delete-access checked-item semantics.'
+    Assert-True ($skillText -match 'OutputFormat Json') 'SKILL.md documents structured JSON deletion output.'
 
     $directExecute = ((& powershell.exe -NoProfile -File $deleteScript -Paths $directExecutePath -Execute 2>&1) | Out-String)
     Assert-True ($directExecute -match 'BLOCK.*PlanToken') 'Execute refuses to run without a preview PlanToken.'
     Assert-True ([IO.File]::Exists($directExecutePath)) 'Missing-token rejection leaves the fixture unchanged.'
+
+    $foreignContextToken = [Convert]::ToBase64String([byte[]](1..64))
+    $foreignContextResult = ((& powershell.exe -NoProfile -File $deleteScript -Paths $tamperedTokenPath -PlanToken $foreignContextToken -Execute 2>&1) | Out-String)
+    Assert-True ($foreignContextResult -match 'BLOCK.*same.*terminal|BLOCK.*host context') 'An undecryptable PlanToken explains that preview and execute must share a host context.'
+    Assert-True ([IO.File]::Exists($tamperedTokenPath)) 'Host-context token rejection leaves the fixture unchanged.'
 
     $whatIfPreview = ((& powershell.exe -NoProfile -File $deleteScript -Paths $whatIfPath 2>&1) | Out-String)
     $whatIfToken = Get-PlanToken -Text $whatIfPreview
@@ -293,6 +458,20 @@ try {
     $execute = ((& powershell.exe -NoProfile -File $deleteScript -Paths $executePath -PlanToken $executeToken -Execute 2>&1) | Out-String)
     Assert-True ($execute -match '(?m)^DELETED\s+') 'Execute mode deletes an approved temporary fixture.'
     Assert-True (-not [IO.File]::Exists($executePath)) 'Execute mode verifies the fixture is gone.'
+
+    $jsonExecutePreviewText = ((& powershell.exe -NoProfile -File $deleteScript -Paths $jsonExecutePath -OutputFormat Json 2>&1) | Out-String)
+    $jsonExecutePreview = ConvertFrom-TestJson -Text $jsonExecutePreviewText
+    $jsonExecuteToken = if ($null -ne $jsonExecutePreview) { [string]$jsonExecutePreview.plan_token } else { '' }
+    $jsonExecuteText = ((& powershell.exe -NoProfile -File $deleteScript -Paths $jsonExecutePath -PlanToken $jsonExecuteToken -Execute -OutputFormat Json 2>&1) | Out-String)
+    $jsonExecute = ConvertFrom-TestJson -Text $jsonExecuteText
+    Assert-True ($null -ne $jsonExecute) 'JSON execute output is valid JSON.'
+    if ($null -ne $jsonExecute) {
+        Assert-True ($jsonExecute.mode -eq 'execute') 'JSON execute identifies execute mode.'
+        Assert-True (@($jsonExecute.events | Where-Object { $_.status -eq 'ACCESS_OK' -and $_.checked_items -eq 1 }).Count -eq 1) 'JSON execute reports checked_items for ACCESS_OK.'
+        Assert-True (@($jsonExecute.events | Where-Object { $_.status -eq 'DELETED' }).Count -eq 1) 'JSON execute exposes a structured DELETED event.'
+        Assert-True ($jsonExecute.summary.deleted -eq 1) 'JSON execute exposes structured deletion counts.'
+    }
+    Assert-True (-not [IO.File]::Exists($jsonExecutePath)) 'JSON execute verifies the fixture is gone.'
 
     $tamperedPreview = ((& powershell.exe -NoProfile -File $deleteScript -Paths $tamperedTokenPath 2>&1) | Out-String)
     $validTamperedToken = Get-PlanToken -Text $tamperedPreview
@@ -309,6 +488,64 @@ try {
     Assert-True ($changingResult -match 'BLOCK.*changed since preview') 'Execute rejects a target whose contents changed after preview.'
     Assert-True ([IO.File]::Exists((Join-Path $changingPath 'important-document.docx'))) 'Snapshot rejection preserves files added after preview.'
 
+    $lockedPreview = ((& powershell.exe -NoProfile -File $deleteScript -Paths $lockedTree 2>&1) | Out-String)
+    $lockedToken = Get-PlanToken -Text $lockedPreview
+    $lockStream = [IO.File]::Open($lockedFile, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+    try {
+        $lockedResult = ((& powershell.exe -NoProfile -File $deleteScript -Paths $lockedTree -PlanToken $lockedToken -Execute 2>&1) | Out-String)
+    } finally {
+        $lockStream.Dispose()
+    }
+    Assert-True ($lockedResult -match 'BLOCK.*delete-access preflight') 'Execute blocks the whole batch when a target is locked or lacks delete access.'
+    Assert-True ($lockedResult -notmatch 'PARTIAL_OR_FAILED') 'Delete-access preflight avoids entering partial deletion for a known access failure.'
+    Assert-True ([IO.File]::Exists($lockedFile)) 'Delete-access preflight leaves a locked fixture unchanged.'
+
+    $aclDeleteTreeSddl = $null
+    $aclDeleteFileSddl = $null
+    try {
+        $aclDeleteTreeAcl = Get-Acl -LiteralPath $aclDeleteTree
+        $aclDeleteFileAcl = Get-Acl -LiteralPath $aclDeleteFile
+        $aclDeleteTreeSddl = $aclDeleteTreeAcl.GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::All)
+        $aclDeleteFileSddl = $aclDeleteFileAcl.GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::All)
+        $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+        $fileDeleteDeny = New-Object Security.AccessControl.FileSystemAccessRule($currentSid, [Security.AccessControl.FileSystemRights]::Delete, [Security.AccessControl.AccessControlType]::Deny)
+        $parentDeleteChildDeny = New-Object Security.AccessControl.FileSystemAccessRule($currentSid, [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles, [Security.AccessControl.AccessControlType]::Deny)
+        $aclDeleteFileAcl.AddAccessRule($fileDeleteDeny)
+        $aclDeleteTreeAcl.AddAccessRule($parentDeleteChildDeny)
+        Set-Acl -LiteralPath $aclDeleteFile -AclObject $aclDeleteFileAcl
+        Set-Acl -LiteralPath $aclDeleteTree -AclObject $aclDeleteTreeAcl
+
+        $aclPreview = ((& powershell.exe -NoProfile -File $deleteScript -Paths $aclDeleteFile 2>&1) | Out-String)
+        $aclToken = Get-PlanToken -Text $aclPreview
+        $aclResult = ((& powershell.exe -NoProfile -File $deleteScript -Paths $aclDeleteFile -PlanToken $aclToken -Execute 2>&1) | Out-String)
+        Assert-True ($aclResult -match 'BLOCK.*delete-access preflight') 'A real delete deny ACL blocks the whole batch before mutation.'
+        Assert-True ($aclResult -notmatch 'PARTIAL_OR_FAILED') 'A real delete deny ACL never enters partial deletion.'
+        Assert-True ([IO.File]::Exists($aclDeleteFile)) 'A real delete deny ACL leaves the fixture unchanged.'
+    } catch {
+        Write-Output ('SKIP  The delete deny ACL fixture could not be established: ' + $_.Exception.Message)
+    } finally {
+        if ($null -ne $aclDeleteTreeSddl) {
+            try {
+                $restoreTreeAcl = Get-Acl -LiteralPath $aclDeleteTree
+                $restoreTreeAcl.SetSecurityDescriptorSddlForm($aclDeleteTreeSddl)
+                Set-Acl -LiteralPath $aclDeleteTree -AclObject $restoreTreeAcl
+            } catch {
+                Write-Output ('FAIL  The delete fixture parent ACL could not be restored: ' + $_.Exception.Message)
+                $failures.Add('The delete fixture parent ACL could not be restored.')
+            }
+        }
+        if ($null -ne $aclDeleteFileSddl) {
+            try {
+                $restoreFileAcl = Get-Acl -LiteralPath $aclDeleteFile
+                $restoreFileAcl.SetSecurityDescriptorSddlForm($aclDeleteFileSddl)
+                Set-Acl -LiteralPath $aclDeleteFile -AclObject $restoreFileAcl
+            } catch {
+                Write-Output ('FAIL  The delete fixture file ACL could not be restored: ' + $_.Exception.Message)
+                $failures.Add('The delete fixture file ACL could not be restored.')
+            }
+        }
+    }
+
     $confirmPreview = ((& powershell.exe -NoProfile -File $deleteScript -Paths $confirmPath 2>&1) | Out-String)
     $confirmToken = Get-PlanToken -Text $confirmPreview
     $confirmCommand = "`$ConfirmPreference='Medium'; & '" + $deleteScript.Replace("'", "''") + "' -Paths '" + $confirmPath.Replace("'", "''") + "' -PlanToken '" + $confirmToken.Replace("'", "''") + "' -Execute"
@@ -318,7 +555,6 @@ try {
 }
 finally {
     Microsoft.PowerShell.Management\Remove-Item function:\global:Remove-Item -ErrorAction SilentlyContinue
-    Microsoft.PowerShell.Management\Remove-Item function:\global:Get-ChildItem -ErrorAction SilentlyContinue
     Microsoft.PowerShell.Utility\Remove-Variable SafetyTestRemoveCalls -Scope Global -ErrorAction SilentlyContinue
     if ($junctionCreated -and [IO.Directory]::Exists($junctionPath)) {
         [IO.Directory]::Delete($junctionPath, $false)
